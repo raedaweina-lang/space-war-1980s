@@ -1,0 +1,931 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Retro Space War 1984</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: #050505;
+            color: #fff;
+            font-family: 'Courier New', Courier, monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Outer container framing the canvas */
+        #game-container {
+            position: relative;
+            border: 4px solid #00ffcc;
+            box-shadow: 0 0 20px #00ffcc, inset 0 0 15px #00ffcc;
+        }
+
+        canvas {
+            background-color: #000;
+            display: block;
+        }
+
+        /* Head-Up Display (HUD) for Score, Stage, and Lives */
+        .ui-panel {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            right: 10px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 18px;
+            font-weight: bold;
+            color: #ff007f;
+            text-shadow: 0 0 5px #ff007f;
+            pointer-events: none;
+        }
+
+        /* Title screen and game over overlay screen */
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 38px;
+            color: #00ffcc;
+            text-shadow: 0 0 10px #00ffcc;
+            margin-bottom: 20px;
+        }
+
+        p {
+            font-size: 18px;
+            color: #ffaa00;
+            margin-bottom: 10px;
+            line-height: 1.5;
+        }
+
+        .btn {
+            margin-top: 20px;
+            padding: 12px 24px;
+            font-size: 20px;
+            font-family: inherit;
+            font-weight: bold;
+            color: #000;
+            background-color: #00ffcc;
+            border: none;
+            cursor: pointer;
+            box-shadow: 0 0 10px #00ffcc;
+            transition: 0.2s;
+        }
+
+        .btn:hover {
+            background-color: #ff007f;
+            color: #fff;
+            box-shadow: 0 0 15px #ff007f;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <!-- UI Overlay for current game state metrics -->
+    <div class="ui-panel">
+        <div>SCORE: <span id="score">0000</span></div>
+        <div>STAGE: <span id="stage">1</span></div>
+        <div>LIVES: <span id="lives">3</span></div>
+    </div>
+    
+    <!-- 2D Rendering Surface -->
+    <canvas id="gameCanvas" width="600" height="700"></canvas>
+
+    <!-- Start / Game Over Screen Overlay -->
+    <div id="overlay">
+        <h1 id="title">SPACE WAR 1984</h1>
+        <p>Use <b>ARROW KEYS</b> or <b>W / A / S / D</b> to move</p>
+        <p>Rapidly tap <b>SPACEBAR</b> to Fire Fast!</p>
+        <button class="btn" id="start-btn">START GAME</button>
+    </div>
+</div>
+
+<script>
+    // =========================================================================
+    // DOM REFERENCES & GRAPHICS CONTEXT SETUP
+    // =========================================================================
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('score');
+    const stageEl = document.getElementById('stage');
+    const livesEl = document.getElementById('lives');
+    const overlay = document.getElementById('overlay');
+    const startBtn = document.getElementById('start-btn');
+    const titleEl = document.getElementById('title');
+
+    // =========================================================================
+    // AUDIO SYSTEM (Web Audio API Synthesizer)
+    // =========================================================================
+    // AudioContext handles digital sound generation without needing external MP3/WAV files
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    let audioCtx;
+
+    /**
+     * Generates a mathematical distortion curve to give sound effects an aggressive, 80s arcade distortion.
+     * @param {number} amount - Intensity of the audio saturation/clipping distortion.
+     */
+    function makeDistortionCurve(amount) {
+        const k = typeof amount === 'number' ? amount : 50;
+        const n_samples = 44100;
+        const curve = new Float32Array(n_samples);
+        const deg = Math.PI / 180;
+        for (let i = 0; i < n_samples; ++i) {
+            const x = (i * 2) / n_samples - 1;
+            curve[i] = ((3 + k) * x * 20 * deg) / (Math.PI + k * Math.abs(x));
+        }
+        return curve;
+    }
+
+    /**
+     * Plays a synthesized musical pitch using oscillators.
+     * @param {number} freq - Pitch frequency in Hertz (Hz).
+     * @param {string} type - Waveform shape ('square', 'sawtooth', 'triangle', 'sine').
+     * @param {number} duration - Length of the note in seconds.
+     * @param {number} startTime - Precise AudioContext execution timestamp.
+     * @param {number} volume - Volume output scaling (0.0 to 1.0).
+     */
+    function playNote(freq, type, duration, startTime, volume = 0.2) {
+        if (!audioCtx) return;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, startTime);
+
+        gain.gain.setValueAtTime(volume, startTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        osc.start(startTime);
+        osc.stop(startTime + duration);
+    }
+
+    /**
+     * Triggers sound effects (laser, explosion, hits, stage chimes) dynamically using code.
+     * @param {string} type - Key identifying which sound effect preset to construct.
+     */
+    function playSound(type) {
+        if (!audioCtx) return;
+        const now = audioCtx.currentTime;
+
+        if (type === 'laser') {
+            // High-to-low sweeping frequency creates classic laser zap sound
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(800, now);
+            osc.frequency.exponentialRampToValueAtTime(100, now + 0.1);
+            gain.gain.setValueAtTime(0.15, now);
+            gain.gain.linearRampToValueAtTime(0.01, now + 0.1);
+            osc.start(now);
+            osc.stop(now + 0.1);
+        } else if (type === 'enemyShoot') {
+            // Low-to-high sweeping frequency for enemy projectiles
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(300, now);
+            osc.frequency.exponentialRampToValueAtTime(600, now + 0.12);
+            gain.gain.setValueAtTime(0.08, now);
+            gain.gain.linearRampToValueAtTime(0.01, now + 0.12);
+            osc.start(now);
+            osc.stop(now + 0.12);
+        } else if (type === 'explosion') {
+            // Quick dropping square wave for standard enemy explosions
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(150, now);
+            osc.frequency.exponentialRampToValueAtTime(30, now + 0.3);
+            gain.gain.setValueAtTime(0.4, now);
+            gain.gain.linearRampToValueAtTime(0.01, now + 0.3);
+            osc.start(now);
+            osc.stop(now + 0.3);
+        } else if (type === 'playerHit') { 
+            // Multi-layered heavy sound combining white noise, distortion, and sub-bass for player destruction
+            const duration = 1.8;
+
+            const distortion = audioCtx.createWaveShaper();
+            distortion.curve = makeDistortionCurve(100);
+            distortion.oversample = '4x';
+
+            const masterGain = audioCtx.createGain();
+            masterGain.gain.setValueAtTime(1.0, now);
+            masterGain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+            distortion.connect(masterGain);
+            masterGain.connect(audioCtx.destination);
+
+            // Generates raw random noise data buffer
+            const bufferSize = audioCtx.sampleRate * duration;
+            const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            const output = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) {
+                output[i] = Math.random() * 2 - 1;
+            }
+
+            const noise = audioCtx.createBufferSource();
+            noise.buffer = buffer;
+
+            const noiseFilter = audioCtx.createBiquadFilter();
+            noiseFilter.type = 'lowpass';
+            noiseFilter.frequency.setValueAtTime(8000, now);
+            noiseFilter.frequency.exponentialRampToValueAtTime(120, now + duration);
+
+            const noiseGain = audioCtx.createGain();
+            noiseGain.gain.setValueAtTime(1.2, now);
+            noiseGain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+            noise.connect(noiseFilter);
+            noiseFilter.connect(noiseGain);
+            noiseGain.connect(distortion);
+
+            // Screaming metallic frequency oscillators
+            const oscHigh1 = audioCtx.createOscillator();
+            const oscHigh2 = audioCtx.createOscillator();
+            const highGain = audioCtx.createGain();
+
+            oscHigh1.type = 'sawtooth';
+            oscHigh2.type = 'sawtooth';
+
+            oscHigh1.frequency.setValueAtTime(8000, now);
+            oscHigh1.frequency.exponentialRampToValueAtTime(200, now + duration);
+
+            oscHigh2.frequency.setValueAtTime(8400, now);
+            oscHigh2.frequency.exponentialRampToValueAtTime(210, now + duration);
+
+            highGain.gain.setValueAtTime(0.8, now);
+            highGain.gain.exponentialRampToValueAtTime(0.001, now + (duration * 0.7));
+
+            oscHigh1.connect(highGain);
+            oscHigh2.connect(highGain);
+            highGain.connect(distortion);
+
+            // Low frequency sub-bass hit
+            const subOsc = audioCtx.createOscillator();
+            const subGain = audioCtx.createGain();
+
+            subOsc.type = 'sawtooth';
+            subOsc.frequency.setValueAtTime(180, now);
+            subOsc.frequency.exponentialRampToValueAtTime(15, now + duration);
+
+            subGain.gain.setValueAtTime(1.5, now);
+            subGain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+            subOsc.connect(subGain);
+            subGain.connect(distortion);
+
+            noise.start(now);
+            oscHigh1.start(now);
+            oscHigh2.start(now);
+            subOsc.start(now);
+
+            noise.stop(now + duration);
+            oscHigh1.stop(now + duration);
+            oscHigh2.stop(now + duration);
+            subOsc.stop(now + duration);
+        } else if (type === 'stageStartMusic') {
+            // Ascending major chord sequence announcing game/stage start
+            const notes = [261.63, 329.63, 392.00, 523.25, 659.25];
+            const tempo = 0.08;
+            notes.forEach((freq, idx) => {
+                playNote(freq, 'square', 0.15, now + idx * tempo, 0.18);
+            });
+        } else if (type === 'stageClearMusic') {
+            // Multi-note victory fan-fare melody played on wave completion
+            const tune = [
+                { f: 523.25, d: 0.12, t: 0.00 },
+                { f: 659.25, d: 0.12, t: 0.24 },
+                { f: 783.99, d: 0.12, t: 0.24 },
+                { f: 1046.50, d: 0.35, t: 0.36 },
+                { f: 880.00, d: 0.15, t: 0.72 },
+                { f: 1046.50, d: 0.50, t: 0.88 }
+            ];
+            tune.forEach(note => {
+                playNote(note.f, 'triangle', note.d, now + note.t, 0.25);
+                playNote(note.f / 2, 'square', note.d, now + note.t, 0.15);
+            });
+        }
+    }
+
+    // =========================================================================
+    // GLOBAL GAME STATE VARIABLES
+    // =========================================================================
+    let score = 0;               // Player's accumulated points
+    let lives = 3;               // Remaining player lives
+    let stage = 1;               // Current stage/wave level
+    let gameOver = true;         // Controls main loop execution state
+    let stageTransition = false; // Flag for pause/banner screen between stages
+    let transitionTimer = 0;     // Ticks down remaining delay during stage transitions
+    let frameTicks = 0;          // Lifetime frame counter used for math-driven animations
+    let keys = {};               // Key-value map holding active keyboard button states
+    let animationId;             // Reference ID for canceling requestAnimationFrame loops
+
+    // Entity Collection Containers
+    let player;                  // Player ship instance
+    let bullets = [];            // Active player projectiles
+    let enemyBullets = [];       // Active enemy projectiles
+    let enemies = [];            // Active enemy ship instances
+    let stars = [];              // Starfield background objects
+
+    // =========================================================================
+    // INPUT LISTENERS
+    // =========================================================================
+    // Tracks active keys down and triggers firing on Spacebar tap
+    window.addEventListener('keydown', e => {
+        if (e.code === 'Space' && !e.repeat && !gameOver && !stageTransition && player) {
+            player.shoot();
+        }
+        keys[e.code] = true;
+    });
+
+    // Removes keys from active map on key release
+    window.addEventListener('keyup', e => {
+        keys[e.code] = false;
+    });
+
+    // Populate starfield data objects for parallax background effect
+    for (let i = 0; i < 80; i++) {
+        stars.push({
+            x: Math.random() * canvas.width,
+            y: Math.random() * canvas.height,
+            size: Math.random() * 2 + 1,
+            speed: Math.random() * 1.5 + 0.5
+        });
+    }
+
+    // =========================================================================
+    // GAME ENTITY CLASSES
+    // =========================================================================
+
+    /**
+     * Class representing the user-controlled spaceship.
+     */
+    class Player {
+        constructor() {
+            this.width = 40;
+            this.height = 30;
+            this.x = canvas.width / 2 - this.width / 2; // Center horizontally
+            this.y = canvas.height - 60;                // Position near bottom
+            this.speed = 6;                             // Movement velocity in pixels per frame
+        }
+
+        // Renders vector triangular player ship with neon glow
+        draw() {
+            ctx.fillStyle = '#00ffcc';
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = '#00ffcc';
+            ctx.beginPath();
+            ctx.moveTo(this.x + this.width / 2, this.y);
+            ctx.lineTo(this.x + this.width, this.y + this.height);
+            ctx.lineTo(this.x + this.width / 2, this.y + this.height - 8);
+            ctx.lineTo(this.x, this.y + this.height);
+            ctx.closePath();
+            ctx.fill();
+            ctx.shadowBlur = 0;
+        }
+
+        // Spawns player laser projectile
+        shoot() {
+            bullets.push(new Bullet(this.x + this.width / 2, this.y, -10, '#00ffcc'));
+            playSound('laser');
+        }
+
+        // Reads key states and updates player coordinates bounded within screen boundaries
+        update() {
+            if ((keys['ArrowLeft'] || keys['KeyA']) && this.x > 0) {
+                this.x -= this.speed;
+            }
+            if ((keys['ArrowRight'] || keys['KeyD']) && this.x < canvas.width - this.width) {
+                this.x += this.speed;
+            }
+            if ((keys['ArrowUp'] || keys['KeyW']) && this.y > canvas.height / 2) {
+                this.y -= this.speed;
+            }
+            if ((keys['ArrowDown'] || keys['KeyS']) && this.y < canvas.height - this.height - 10) {
+                this.y += this.speed;
+            }
+        }
+    }
+
+    /**
+     * Class representing laser projectiles fired by player or enemies.
+     */
+    class Bullet {
+        constructor(x, y, speedY, color) {
+            this.x = x;
+            this.y = y;
+            this.radius = 3;
+            this.speedY = speedY; // Negative speed moves up (player), positive speed moves down (enemy)
+            this.color = color;
+        }
+
+        draw() {
+            ctx.fillStyle = this.color;
+            ctx.shadowBlur = 8;
+            ctx.shadowColor = this.color;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+        }
+
+        update() {
+            this.y += this.speedY;
+        }
+    }
+
+    /**
+     * Class representing enemy alien ships with stage-scaling designs and dive mechanics.
+     */
+    class Enemy {
+        constructor(x, y, row, stageNum) {
+            this.x = x;
+            this.y = y;
+            this.originX = x;            // Fixed formation reference coordinate X
+            this.originY = y;            // Fixed formation reference coordinate Y
+            this.width = 32;
+            this.height = 24;
+            this.row = row;              // Row index in grid formation
+            this.stageNum = stageNum;    // Stage level when created
+
+            this.isDiving = false;       // Flag indicating if enemy broke pattern to attack directly
+            this.diveAngle = 0;          // Trajectory angle targeting player position
+            this.diveSpeed = 3.5 + (stageNum * 0.3); // Speed scales up with higher stages
+
+            // Color palette maps per stage group
+            const colors = [
+                ['#ff0055', '#ffcc00', '#ff00ff'],
+                ['#00ff66', '#00ffff', '#3399ff'],
+                ['#ff6600', '#ff0055', '#ffff00'],
+                ['#cc00ff', '#00ffcc', '#ff00aa'],
+                ['#ffffff', '#ff3333', '#00ffaa']
+            ];
+            
+            const currentColors = colors[(stageNum - 1) % colors.length];
+            this.color = currentColors[row % currentColors.length];
+        }
+
+        // Draws pixel artwork for 5 rotating stage-based enemy ship variants
+        draw() {
+            ctx.fillStyle = this.color;
+            ctx.shadowBlur = 8;
+            ctx.shadowColor = this.color;
+
+            const designType = (this.stageNum - 1) % 5;
+
+            switch (designType) {
+                case 0: // Classic Invader shape
+                    ctx.fillRect(this.x + 4, this.y, this.width - 8, this.height);
+                    ctx.fillRect(this.x, this.y + 6, this.width, this.height - 12);
+                    ctx.fillRect(this.x - 2, this.y + 12, 4, 8);
+                    ctx.fillRect(this.x + this.width - 2, this.y + 12, 4, 8);
+                    break;
+                case 1: // Flying Saucer shape
+                    ctx.beginPath();
+                    ctx.ellipse(this.x + this.width / 2, this.y + this.height / 2, this.width / 2, this.height / 3, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.beginPath();
+                    ctx.arc(this.x + this.width / 2, this.y + 4, 6, 0, Math.PI * 2);
+                    ctx.fill();
+                    break;
+                case 2: // Diamond Fighter shape
+                    ctx.beginPath();
+                    ctx.moveTo(this.x + this.width / 2, this.y);
+                    ctx.lineTo(this.x + this.width, this.y + this.height / 2);
+                    ctx.lineTo(this.x + this.width / 2, this.y + this.height);
+                    ctx.lineTo(this.x, this.y + this.height / 2);
+                    ctx.closePath();
+                    ctx.fill();
+                    break;
+                case 3: // Twin-tail Cruiser shape
+                    ctx.fillRect(this.x + 10, this.y, 12, this.height);
+                    ctx.fillRect(this.x + 4, this.y - 4, 4, 6);
+                    ctx.fillRect(this.x + this.width - 8, this.y - 4, 4, 6);
+                    ctx.fillRect(this.x, this.y + 6, this.width, 6);
+                    ctx.fillRect(this.x - 4, this.y + 14, 8, 4);
+                    ctx.fillRect(this.x + this.width - 4, this.y + 14, 8, 4);
+                    break;
+                case 4: // Heavy Dreadnought shape
+                    ctx.fillRect(this.x, this.y + 4, this.width, 12);
+                    ctx.fillRect(this.x + 6, this.y, this.width - 12, this.height);
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillRect(this.x + 12, this.y + 8, 8, 8);
+                    break;
+            }
+
+            ctx.shadowBlur = 0;
+        }
+
+        // Locks target vector towards player position and initiates diving behavior
+        startDive() {
+            if (!this.isDiving) {
+                this.isDiving = true;
+                this.diveAngle = Math.atan2(player.y - this.y, player.x - this.x);
+            }
+        }
+
+        // Updates position along locked dive trajectory vector
+        updateDive() {
+            this.x += Math.cos(this.diveAngle) * this.diveSpeed;
+            this.y += Math.sin(this.diveAngle) * this.diveSpeed;
+
+            // When diving past bottom edge, recycle enemy back at the top screen border
+            if (this.y > canvas.height) {
+                this.y = -30;
+                this.isDiving = false;
+            }
+        }
+
+        // Prevents formation enemies that drift off bottom from getting lost forever
+        checkWrap() {
+            if (this.y > canvas.height) {
+                this.y = -canvas.height + (this.y - canvas.height);
+                this.originY = this.y;
+            }
+        }
+    }
+
+    // =========================================================================
+    // ENEMY FORMATION & MOVEMENT ENGINE
+    // =========================================================================
+    let enemyDirection = 1;      // Direction multiplier (1 = Right, -1 = Left)
+    let enemySpeed = 1.5;        // Horizontal movement speed multiplier
+    let formationOffsetX = 0;   // Accumulated grid offset X displacement
+    let formationOffsetY = 0;   // Accumulated grid offset Y displacement
+
+    /**
+     * Instantiates a grid formation matrix of Enemy instances for the active stage.
+     */
+    function createEnemies() {
+        enemies = [];
+        formationOffsetX = 0;
+        formationOffsetY = 0;
+        const rows = 4;
+        const cols = 8;
+        const padding = 20;
+        const offsetTop = 60;
+        const offsetLeft = 60;
+
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                let x = offsetLeft + c * (32 + padding);
+                let y = offsetTop + r * (24 + padding);
+                enemies.push(new Enemy(x, y, r, stage));
+            }
+        }
+    }
+
+    /**
+     * Updates positions, formation patterns, random dives, and shooting logic for all active enemies.
+     */
+    function updateEnemies() {
+        let hitEdge = false;
+        const patternType = (stage - 1) % 5;
+
+        // Stage 1 Pattern: Classic march (side-to-side, drop down on wall turn)
+        if (patternType === 0) {
+            formationOffsetX += enemySpeed * enemyDirection;
+            if (formationOffsetX > 100 || formationOffsetX < -40) {
+                enemyDirection *= -1;
+                formationOffsetY += 15;
+            }
+
+            enemies.forEach(enemy => {
+                if (!enemy.isDiving) {
+                    enemy.x = enemy.originX + formationOffsetX;
+                    enemy.y = enemy.originY + formationOffsetY;
+                    enemy.checkWrap();
+                }
+            });
+        } 
+        // Stage 2 Pattern: Sine wave horizontal drift with gradual descent
+        else if (patternType === 1) {
+            formationOffsetX += enemySpeed * enemyDirection;
+            if (formationOffsetX > 120 || formationOffsetX < -40) enemyDirection *= -1;
+            formationOffsetY += 0.25;
+
+            enemies.forEach(enemy => {
+                if (!enemy.isDiving) {
+                    enemy.x = enemy.originX + formationOffsetX + Math.sin(frameTicks * 0.05 + enemy.row) * 15;
+                    enemy.y = enemy.originY + formationOffsetY;
+                    enemy.checkWrap();
+                }
+            });
+        } 
+        // Stage 3 Pattern: Fast sweeping wave bounce
+        else if (patternType === 2) {
+            formationOffsetX += enemySpeed * 1.2 * enemyDirection;
+            if (formationOffsetX > 140 || formationOffsetX < -40) {
+                enemyDirection *= -1;
+                formationOffsetY += 10;
+            }
+
+            enemies.forEach(enemy => {
+                if (!enemy.isDiving) {
+                    enemy.x = enemy.originX + formationOffsetX;
+                    enemy.y = enemy.originY + formationOffsetY + Math.sin(frameTicks * 0.1) * 20;
+                    enemy.checkWrap();
+                }
+            });
+        } 
+        // Stage 4 Pattern: Stationary formation (heavily relies on aggressive diving)
+        else if (patternType === 3) {
+            formationOffsetX += enemySpeed * enemyDirection;
+            if (formationOffsetX > 100 || formationOffsetX < -40) enemyDirection *= -1;
+
+            enemies.forEach(enemy => {
+                if (!enemy.isDiving) {
+                    enemy.x = enemy.originX + formationOffsetX;
+                    enemy.y = enemy.originY + formationOffsetY;
+                    enemy.checkWrap();
+                }
+            });
+        } 
+        // Stage 5 Pattern: Circular orbital oscillation movement
+        else if (patternType === 4) {
+            formationOffsetX += enemySpeed * enemyDirection;
+            if (formationOffsetX > 120 || formationOffsetX < -40) {
+                enemyDirection *= -1;
+                formationOffsetY += 8;
+            }
+
+            enemies.forEach(enemy => {
+                if (!enemy.isDiving) {
+                    enemy.x = enemy.originX + formationOffsetX + Math.cos(frameTicks * 0.08 + enemy.row) * 25;
+                    enemy.y = enemy.originY + formationOffsetY + Math.sin(frameTicks * 0.08 + enemy.x) * 15;
+                    enemy.checkWrap();
+                }
+            });
+        }
+
+        // ---------------------------------------------------------------------
+        // UNIVERSAL DIVE ENGINE (Applies to ALL stages, dive chance ramps up with stage level)
+        // ---------------------------------------------------------------------
+        const diveChance = 0.015 + (stage * 0.003);
+        if (Math.random() < diveChance) {
+            const nonDiving = enemies.filter(e => !e.isDiving);
+            if (nonDiving.length > 0) {
+                const randomEnemy = nonDiving[Math.floor(Math.random() * nonDiving.length)];
+                randomEnemy.startDive();
+            }
+        }
+
+        // Process active diving behavior and random enemy projectile firing
+        enemies.forEach(enemy => {
+            if (enemy.isDiving) {
+                enemy.updateDive();
+            }
+
+            if (enemy.y > 0 && enemy.y < canvas.height) {
+                const shootChance = 0.0015 + (stage * 0.0003);
+                if (Math.random() < shootChance) {
+                    enemyBullets.push(new Bullet(enemy.x + enemy.width / 2, enemy.y + enemy.height, 4 + (stage * 0.2), '#ff0055'));
+                    playSound('enemyShoot');
+                }
+            }
+        });
+
+        // Trigger stage clear sequence when all enemies are destroyed
+        if (enemies.length === 0 && !stageTransition) {
+            stageTransition = true;
+            transitionTimer = 140;
+            playSound('stageClearMusic');
+        }
+    }
+
+    // =========================================================================
+    // COLLISION DETECTION ENGINE
+    // =========================================================================
+    /**
+     * Performs AABB (Axis-Aligned Bounding Box) and point-in-box collision checks
+     * for player lasers vs. enemies, enemy lasers vs. player, and enemy ships vs. player.
+     */
+    function handleCollisions() {
+        // Player Bullets hitting Enemies
+        bullets.forEach((bullet, bIndex) => {
+            enemies.forEach((enemy, eIndex) => {
+                if (
+                    enemy.y > -20 &&
+                    bullet.x > enemy.x &&
+                    bullet.x < enemy.x + enemy.width &&
+                    bullet.y > enemy.y &&
+                    bullet.y < enemy.y + enemy.height
+                ) {
+                    bullets.splice(bIndex, 1);
+                    enemies.splice(eIndex, 1);
+                    score += (4 - enemy.row) * 10 * stage;
+                    scoreEl.innerText = String(score).padStart(4, '0');
+                    playSound('explosion');
+                }
+            });
+        });
+
+        // Enemy Bullets hitting Player
+        enemyBullets.forEach((bullet, bIndex) => {
+            if (
+                bullet.x > player.x &&
+                bullet.x < player.x + player.width &&
+                bullet.y > player.y &&
+                bullet.y < player.y + player.height
+            ) {
+                enemyBullets.splice(bIndex, 1);
+                lives--;
+                livesEl.innerText = lives;
+                playSound('playerHit');
+
+                if (lives <= 0) {
+                    endGame();
+                }
+            }
+        });
+
+        // Enemy Ship body crashing directly into Player
+        enemies.forEach(enemy => {
+            if (
+                enemy.x < player.x + player.width &&
+                enemy.x + enemy.width > player.x &&
+                enemy.y < player.y + player.height &&
+                enemy.y + enemy.height > player.y
+            ) {
+                lives--;
+                livesEl.innerText = lives;
+                playSound('playerHit');
+                enemy.y = canvas.height + 50; // Move collided enemy out of play bounds
+                if (lives <= 0) endGame();
+            }
+        });
+    }
+
+    // =========================================================================
+    // RENDERING & LOOP CONTROL
+    // =========================================================================
+
+    /**
+     * Clears canvas and renders animated scrolling starfield background.
+     */
+    function drawBackground() {
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = '#ffffff';
+        stars.forEach(star => {
+            ctx.fillRect(star.x, star.y, star.size, star.size);
+            star.y += star.speed;
+            if (star.y > canvas.height) {
+                star.y = 0;
+                star.x = Math.random() * canvas.width;
+            }
+        });
+    }
+
+    /**
+     * Renders intermission banner between completed waves and advances stage counter.
+     */
+    function drawStageTransition() {
+        ctx.fillStyle = '#00ffcc';
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = '#00ffcc';
+        ctx.font = 'bold 32px "Courier New", Courier, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`STAGE ${stage} COMPLETE!`, canvas.width / 2, canvas.height / 2 - 20);
+        
+        ctx.fillStyle = '#ff007f';
+        ctx.shadowColor = '#ff007f';
+        ctx.font = 'bold 20px "Courier New", Courier, monospace';
+        ctx.fillText(`PREPARE FOR STAGE ${stage + 1}`, canvas.width / 2, canvas.height / 2 + 30);
+        
+        ctx.shadowBlur = 0;
+        ctx.textAlign = 'left';
+
+        transitionTimer--;
+        if (transitionTimer <= 0) {
+            stage++;
+            stageEl.innerText = stage;
+            enemySpeed += 0.3; // Ramps overall base speed on stage advance
+            bullets = [];
+            enemyBullets = [];
+            createEnemies();
+            stageTransition = false;
+            playSound('stageStartMusic');
+        }
+    }
+
+    /**
+     * Main animation loop running at ~60 FPS via requestAnimationFrame.
+     */
+    function gameLoop() {
+        if (gameOver) return;
+
+        frameTicks++;
+        drawBackground();
+
+        // Update & Render Player
+        player.update();
+        player.draw();
+
+        // Update & Render Player Bullets
+        bullets.forEach((b, index) => {
+            b.update();
+            b.draw();
+            if (b.y < 0) bullets.splice(index, 1);
+        });
+
+        // Update & Render Enemy Bullets
+        enemyBullets.forEach((b, index) => {
+            b.update();
+            b.draw();
+            if (b.y > canvas.height) enemyBullets.splice(index, 1);
+        });
+
+        // Branch execution between stage transition screen vs active gameplay logic
+        if (stageTransition) {
+            drawStageTransition();
+        } else {
+            updateEnemies();
+            enemies.forEach(e => e.draw());
+            handleCollisions();
+        }
+
+        // Re-queue loop for next browser paint frame
+        animationId = requestAnimationFrame(gameLoop);
+    }
+
+    /**
+     * Initializes game state, audio context, and starts the game loop.
+     */
+    function startGame() {
+        // Initialize AudioContext on explicit user gesture to comply with browser autoplay policies
+        if (!audioCtx) {
+            audioCtx = new AudioContext();
+        }
+
+        score = 0;
+        lives = 3;
+        stage = 1;
+        enemySpeed = 1.5;
+        frameTicks = 0;
+        bullets = [];
+        enemyBullets = [];
+        stageTransition = false;
+        
+        scoreEl.innerText = '0000';
+        livesEl.innerText = lives;
+        stageEl.innerText = stage;
+
+        player = new Player();
+        createEnemies();
+
+        gameOver = false;
+        overlay.style.display = 'none';
+        
+        playSound('stageStartMusic');
+        cancelAnimationFrame(animationId);
+        gameLoop();
+    }
+
+    /**
+     * Halts game loop and displays game over overlay screen.
+     */
+    function endGame() {
+        gameOver = true;
+        titleEl.innerText = 'GAME OVER';
+        startBtn.innerText = 'PLAY AGAIN';
+        overlay.style.display = 'flex';
+    }
+
+    // Attach click handler to start/restart button
+    startBtn.addEventListener('click', startGame);
+</script>
+</body>
+</html>
